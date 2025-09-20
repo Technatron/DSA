@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # scripts/sync_leetcode.py
+
 import os
 import requests
 import json
@@ -11,8 +12,8 @@ USERNAME = os.environ.get("LEETCODE_USERNAME")
 SESSION_COOKIE = os.environ.get("LEETCODE_SESSION")
 OUT_DIR = Path("leetcode")
 STATE_FILE = Path(".leetcode_state.json")
-PAGE_LIMIT = 50        # how many submissions to fetch per request (pagination)
 ONLY_ACCEPTED = os.environ.get("ONLY_ACCEPTED", "1") == "1"  # default: only save Accepted solutions
+BATCH_SIZE = 50  # number of submissions to fetch per GraphQL request
 
 if not USERNAME or not SESSION_COOKIE:
     raise SystemExit("Set LEETCODE_USERNAME and LEETCODE_SESSION in environment")
@@ -71,26 +72,47 @@ session.headers.update({
 })
 session.cookies.set("LEETCODE_SESSION", SESSION_COOKIE, domain=".leetcode.com")
 
-# ===== fetch list of submissions (paginated) =====
+# ===== fetch list of submissions using GraphQL =====
+SUBMISSIONS_QUERY = """
+query submissionList($offset: Int!, $limit: Int!) {
+  submissionList(offset: $offset, limit: $limit) {
+    submissions {
+      id
+      statusDisplay
+      lang
+      timestamp
+      question {
+        title
+        titleSlug
+        questionFrontendId
+      }
+    }
+    hasNext
+  }
+}
+"""
+
 def fetch_submission_pages():
     submissions = []
     offset = 0
     while True:
-        url = f"https://leetcode.com/api/submissions/{USERNAME}/?offset={offset}&limit={PAGE_LIMIT}"
-        r = session.get(url, timeout=30)
+        payload = {"query": SUBMISSIONS_QUERY, "variables": {"offset": offset, "limit": BATCH_SIZE}}
+        r = session.post("https://leetcode.com/graphql", json=payload, timeout=30)
         r.raise_for_status()
-        data = r.json()
-        page = data.get("submissions_dump", [])
+        data = r.json().get("data", {})
+        page = data.get("submissionList", {}).get("submissions", [])
+        has_next = data.get("submissionList", {}).get("hasNext", False)
         if not page:
             break
         submissions.extend(page)
-        if len(page) < PAGE_LIMIT:
+        if not has_next:
             break
         offset += len(page)
+        time.sleep(0.2)  # polite delay
     return submissions
 
 # ===== fetch submission detail (GraphQL) =====
-GRAPHQL = """
+GRAPHQL_DETAIL = """
 query submissionDetail($submissionId: Int!) {
   submissionDetail(submissionId: $submissionId) {
     id
@@ -110,7 +132,7 @@ query submissionDetail($submissionId: Int!) {
 """
 
 def fetch_submission_detail(submission_id):
-    payload = {"query": GRAPHQL, "variables": {"submissionId": int(submission_id)}}
+    payload = {"query": GRAPHQL_DETAIL, "variables": {"submissionId": int(submission_id)}}
     r = session.post("https://leetcode.com/graphql", json=payload, timeout=30)
     r.raise_for_status()
     data = r.json()
@@ -121,11 +143,10 @@ def main():
     state = load_state()
     processed = set(state.get("processed_ids", []))
 
-    print("Fetching submissions list...")
+    print("Fetching submissions list via GraphQL...")
     subs = fetch_submission_pages()
     print(f"Total submissions fetched: {len(subs)}")
 
-    # new submissions (IDs not processed yet)
     new_ids = [s["id"] for s in subs if str(s["id"]) not in processed]
     if not new_ids:
         print("No new submissions to process.")
@@ -134,8 +155,7 @@ def main():
     print(f"New submissions to process: {len(new_ids)}")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # process oldest -> newest: reverse so earliest first
-    for sid in reversed(new_ids):
+    for sid in reversed(new_ids):  # process oldest first
         print(f"Fetching detail for submission: {sid}")
         try:
             detail = fetch_submission_detail(sid)
@@ -172,10 +192,8 @@ def main():
         print(f"  saved: {filename}")
 
         processed.add(str(sid))
-        # small delay to be polite
         time.sleep(0.4)
 
-    # update and save state
     state["processed_ids"] = sorted(list(processed), key=int)
     save_state(state)
     print("Done. State updated.")
