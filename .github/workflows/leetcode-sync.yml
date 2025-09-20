@@ -1,0 +1,47 @@
+name: LeetCode Sync
+
+on:
+  schedule:
+    - cron: '0 0 * * *'    # daily at 00:00 UTC — adjust to your preferred cron
+  workflow_dispatch: {}     # allows manual run
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run LeetCode sync
+        env:
+          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
+          LEETCODE_USERNAME: ${{ secrets.LEETCODE_USERNAME }}
+          # OPTIONAL: set these secrets if you want commits attributed to a specific user
+          GIT_COMMIT_NAME: ${{ secrets.GIT_COMMIT_NAME }}
+          GIT_COMMIT_EMAIL: ${{ secrets.GIT_COMMIT_EMAIL }}
+          ONLY_ACCEPTED: '1'   # change to '0' if you want all submissions
+        run: |
+          python scripts/sync_leetcode.py
+
+      - name: Commit and push changes
+        env:
+          GIT_COMMIT_NAME: ${{ secrets.GIT_COMMIT_NAME }}
+          GIT_COMMIT_EMAIL: ${{ secrets.GIT_COMMIT_EMAIL }}
+        run: |
+          git config user.name "${GIT_COMMIT_NAME:-github-actions}"
+          git config user.email "${GIT_COMMIT_EMAIL:-actions@github.com}"
+          git add .
+          git commit -m "chore: sync LeetCode submissions" || echo "No changes to commit"
+          git push
